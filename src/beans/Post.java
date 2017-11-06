@@ -13,7 +13,7 @@ import conexao.Conexao;
 
 public class Post {
 
-	private Page page;
+	private MyPage page;
 
 	private Long idFacebook; // POS_ID_FACEBOOK
 	private String createdTime; // POS_CREATED_TIME
@@ -27,7 +27,7 @@ public class Post {
 
 	}
 
-	public static Post loadFromJson(JsonObject obj, Page page) {
+	public static Post loadFromJson(JsonObject obj, MyPage page) {
 		Post post = new Post();
 
 		post.setIdFacebook(Long.parseLong(obj.getString("id").split("_")[1]));
@@ -42,6 +42,7 @@ public class Post {
 		return post;
 	}
 
+	@SuppressWarnings("finally")
 	public boolean isExists() throws SQLException {
 		Connection con = new Conexao().getConnection();
 		System.out.println("Post isExists Open con");
@@ -85,7 +86,7 @@ public class Post {
 		}
 	}
 	
-	public static List<Post> getPostsByPage(Page page) throws SQLException {
+	public static List<Post> getPostsByPage(MyPage page) throws SQLException {
         List<Post> posts = new ArrayList<>();
         Connection con = new Conexao().getConnection();
         System.out.println("getPostByPage Open con");
@@ -118,10 +119,11 @@ public class Post {
 
     }
 	
-    public boolean hasReaction(JsonObject obj) throws SQLException {
+    @SuppressWarnings("finally")
+	public boolean hasReaction(JsonObject obj) throws SQLException {
         Connection con = new Conexao().getConnection();
         System.out.println("hasReaction Open con");
-        boolean result;
+        boolean result = false;
         try {
             String sql = "SELECT * FROM  Reaction_Post WHERE RPT_ID_USER =? AND RPT_ID_POST = ?";
             PreparedStatement stmt = con.prepareStatement(sql);
@@ -136,7 +138,7 @@ public class Post {
         } finally {
             con.close();
             System.out.println("hasReaction Close con");
-            return false;
+            return result;
         }
     }
     
@@ -158,6 +160,40 @@ public class Post {
             System.out.println("saveReactionPost Close con");
         }
     }
+    
+    public static List<Post> loadAllPosts() throws SQLException {
+    	List<Post> posts = new ArrayList<>();
+        Connection con = new Conexao().getConnection();
+        System.out.println("getPosts Open con");
+        String sql = "SELECT POS_ID_FACEBOOK,POS_MESSAGE,POS_STORY, POS_CREATED_TIME, POS_PAGE_ID "
+                + "FROM POST";
+
+        try {
+            PreparedStatement stm = con.prepareStatement(sql);
+
+            ResultSet rs = stm.executeQuery();
+
+            while (rs.next()) {
+                Post post = new Post();
+                post.setIdFacebook(rs.getLong("POS_ID_FACEBOOK"));
+                post.setMessage(rs.getString("POS_MESSAGE"));
+                post.setStory(rs.getString("POS_STORY"));
+                post.setCreatedTime(rs.getString("POS_CREATED_TIME"));
+                MyPage page = new MyPage();
+                page.setIdFacebook(rs.getLong("POS_PAGE_ID"));
+                post.setPage(page);
+                posts.add(post);
+            }
+            rs.close();
+            stm.close();
+        } catch (SQLException ex) {
+            System.out.println("[post][getPosts] "+ex.getMessage());
+        } finally {
+            con.close();
+            System.out.println("getPosts Close con");
+        }
+        return posts;
+	}
 
 	// Getters and Setters
 	public String getCreatedTime() {
@@ -192,12 +228,14 @@ public class Post {
 		this.story = story;
 	}
 
-	public Page getPage() {
+	public MyPage getPage() {
 		return page;
 	}
 
-	public void setPage(Page page) {
+	public void setPage(MyPage page) {
 		this.page = page;
 	}
+
+	
 
 }

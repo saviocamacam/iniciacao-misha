@@ -137,7 +137,7 @@ public class Comment {
 		this.post = post;
 	}
 
-	private Long getIdRepliedComment() {
+	public Long getIdRepliedComment() {
 		return idRepliedComment;
 	}
 
@@ -159,5 +159,48 @@ public class Comment {
 
 	public void setFromName(String fromName) {
 		this.fromName = fromName;
+	}
+
+	public static List<Comment> loadAllComments(int mode) throws SQLException {
+		
+		List<Comment> comments = new ArrayList<>();
+        Connection con = new Conexao().getConnection();
+        System.out.println("getCommentByPost Open con");
+        
+        String sql = "";
+        
+        if(mode == 1)
+        	sql = "SELECT * FROM Comment WHERE com_id_facebook = com_id_comm_replied";
+        else if (mode == 2)
+        	sql = "SELECT * FROM Comment WHERE com_id_facebook <> com_id_comm_replied";
+        
+        try {
+            PreparedStatement stm = con.prepareStatement(sql);
+
+            ResultSet rs = stm.executeQuery();
+
+            while (rs.next()) {
+                Comment comment = new Comment();
+                comment.setCreatedTime(rs.getString("COM_CREATED_TIME"));
+                comment.setFromId(rs.getLong("COM_FROM_ID"));
+                comment.setFromName(rs.getString("COM_FROM_NAME"));
+                comment.setIdCommentFacebook(rs.getLong("COM_ID_FACEBOOK"));
+                comment.setIdRepliedComment(rs.getLong("COM_ID_COMM_REPLIED"));
+                comment.setMessage(rs.getString("COM_MESSAGE"));
+                Post post = new Post();
+                post.setIdFacebook(rs.getLong("COM_POST_ID"));
+                post.setCreatedTime(rs.getString("COM_CREATED_TIME"));
+                comment.setPost(post);
+                comments.add(comment);
+            }
+            rs.close();
+            stm.close();
+        } catch (SQLException ex) {
+            System.out.println("[comment][getCommentsByPost] "+ex.getMessage());
+        } finally {
+            con.close();
+            System.out.println("getCommentByPost Close con");
+        }
+        return comments;
 	}
 }

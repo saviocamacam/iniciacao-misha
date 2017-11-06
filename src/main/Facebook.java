@@ -8,27 +8,32 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.List;
+import java.sql.BatchUpdateException;
 
 import org.apache.commons.lang3.ArrayUtils;
+import org.postgresql.util.PSQLException;
 
 import com.restfb.Connection;
 import com.restfb.DefaultFacebookClient;
 import com.restfb.FacebookClient;
 import com.restfb.Version;
+import com.restfb.exception.FacebookGraphException;
 import com.restfb.json.JsonException;
 import com.restfb.json.JsonObject;
+import com.restfb.types.Page;
 
 import beans.Comment;
-import beans.Page;
+import beans.MyPage;
 import beans.Post;
 import beans.PostInfo;
+import beans.Reaction;
 import conexao.Conexao;
 
 public class Facebook {
 
 	private final String accessToken = "1339503919396928|461eb4d12ed790df16a6282a0379834d"; // i5XUUvsezTyGcAJe3N6tzpYvfOQ
 	private final FacebookClient facebookClient;
-	private Date lastDate;
+	private Date lastDate = null;
 	private List<PostInfo> listOfPost;
 
 	public Facebook() {
@@ -37,9 +42,8 @@ public class Facebook {
 		this.listOfPost = new ArrayList<>();
 	}
 
-	public void storePosts(Page page) throws SQLException {
-		Connection<JsonObject> currentPage = facebookClient.fetchConnection(page.getIdFacebook() + "/feed",
-				JsonObject.class);
+	public void storePosts(MyPage page, Date initialDate, Date finalDate) throws SQLException {
+		Connection<JsonObject> currentPage = facebookClient.fetchConnection(page.getIdFacebook() + "/feed", JsonObject.class);
 		int i = 1;
 
 		while (true) {
@@ -65,9 +69,9 @@ public class Facebook {
 		}
 	}
 
-	public void storePosts2(Page page) throws SQLException {
-		Connection<JsonObject> currentPage = facebookClient.fetchConnection(page.getIdFacebook() + "/feed",
-				JsonObject.class);
+	public void storePosts2(MyPage page) throws SQLException {
+		Connection<JsonObject> currentPage = facebookClient.fetchConnection(page.getIdFacebook() + "/feed", JsonObject.class);
+		
 		int i = 1;
 
 		java.sql.Connection con = new Conexao().getConnection();
@@ -114,6 +118,73 @@ public class Facebook {
 				currentPage = facebookClient.fetchConnectionPage(currentPage.getNextPageUrl(), JsonObject.class);
 		}
 	}
+	
+	public List<Post> storeIntervalPosts(MyPage page, Date initialDate, Date finalDate) {
+		Connection<JsonObject> currentPagination = facebookClient.fetchConnection(page.getIdFacebook() + "/feed", JsonObject.class);
+		List<Post> storedPosts = new ArrayList<>();
+		java.sql.Connection con = new Conexao().getConnection();
+		String sql = "INSERT INTO Post (POS_ID_FACEBOOK,POS_MESSAGE, POS_STORY, POS_CREATED_TIME, POS_PAGE_ID )"
+				+ "VALUES (?,?,?,?,?)";
+        
+        PreparedStatement statement;
+        int i = 0;
+		try {
+			statement = con.prepareStatement(sql);
+			while(true) {
+				Post post = null;
+				
+				for (JsonObject obj : currentPagination.getData()) {
+					post = Post.loadFromJson(obj, page);
+					
+					statement.setLong(1, post.getIdFacebook());
+					statement.setString(2, post.getMessage());
+					statement.setString(3, post.getStory());
+					statement.setString(4, post.getCreatedTime());
+					statement.setLong(5, page.getIdFacebook());
+					
+					Date createdTime = stringToDate(post.getCreatedTime());
+					i++;
+					
+					if(createdTime.after(initialDate) && createdTime.before(finalDate)) {
+						storedPosts.add(post);
+						statement.addBatch();
+					}
+				}
+				
+				if(post != null) {
+					Date createdTime = stringToDate(post.getCreatedTime());
+					if(createdTime.after(finalDate)) {
+						statement.executeBatch();
+						break;
+					}
+				}
+				
+				if (!currentPagination.hasNext()) {
+					statement.executeBatch();
+					break;
+				}
+				if(i % 100 == 0) {
+					statement.executeBatch();
+					statement.close();
+					statement = con.prepareStatement(sql);
+				}
+				
+				currentPagination = facebookClient.fetchConnectionPage(currentPagination.getNextPageUrl(), JsonObject.class);
+			}
+			statement.close();
+			con.close();
+		} catch (SQLException e) {
+			System.out.println("================ {{{");
+	        SQLException current = e;
+	        do {
+	            current.printStackTrace();
+	        } while ((current = current.getNextException()) != null);
+	        System.out.println("================ }}}");
+	        
+			e.printStackTrace();
+		}
+		return storedPosts;
+	}
 
 	private Date stringToDate(String string) {
 		String lastPost = string;
@@ -138,8 +209,8 @@ public class Facebook {
 			while (true) {
 				for (JsonObject obj : currentPage.getData()) {
 					Comment comment = Comment.loadFromJson(obj, post);
-
 					Date dateCurrentComment = stringToDate(comment.getCreatedTime());
+					
 					if (lastDate.after(dateCurrentComment)) {
 						// if (!comment.isExists()) {
 						comment.saveComment();
@@ -154,6 +225,189 @@ public class Facebook {
 			}
 		} catch (Exception e) {
 			System.out.println("[fb][storeComments] " + e.getMessage());
+		}
+	}
+	
+	public List<Comment> storeOnlyComments(Post post, int mode, Comment c) throws SQLException {
+		
+		List<Comment> storedComments = new ArrayList<>();
+		java.sql.Connection con = null;
+		String sql = "INSERT INTO Comment ("
+				+ "COM_ID_FACEBOOK, "
+				+ "COM_ID_COMM_REPLIED, "
+				+ "COM_MESSAGE, "
+				+ "COM_FROM_ID, "
+				+ "COM_FROM_NAME, "
+				+ "COM_CREATED_TIME, "
+				+ "COM_POST_ID) "
+				+ "VALUES (?,?,?,?,?,?,?)";
+        
+        PreparedStatement statement = null;
+        int i = 0;
+        
+        try {
+        	Connection<JsonObject> currentPagination = null;
+    		if(mode == 1)
+    			currentPagination = facebookClient.fetchConnection(post.getPage().getIdFacebook() + "_" + post.getIdFacebook() + "/comments", JsonObject.class);
+    		else {
+    			currentPagination = facebookClient.fetchConnection(
+    					c.getPost().getIdFacebook() + "_" + c.getIdCommentFacebook() + "/comments",
+    					JsonObject.class);
+    		}
+    		
+			
+			while(true) {
+				if(currentPagination.getData().size() > 0) {
+					con = new Conexao().getConnection();
+					statement = con.prepareStatement(sql);
+				}
+				Comment comment = null;
+				
+				for (JsonObject obj : currentPagination.getData()) {
+					if(mode == 1)
+						comment = Comment.loadFromJson(obj, post);
+					else {
+						comment = Comment.loadFromJson(obj, post, c);
+					}
+					
+					statement.setLong(1, comment.getIdCommentFacebook());
+					statement.setLong(2, comment.getIdRepliedComment());
+					statement.setString(3, comment.getMessage());
+					statement.setLong(4, comment.getFromId());
+					statement.setString(5, comment.getFromName());
+					statement.setString(6, comment.getCreatedTime());
+					statement.setLong(7, post.getIdFacebook());
+					
+					Date createdTime = stringToDate(post.getCreatedTime());
+					
+					i++;
+					if(mode == 1 && lastDate == null) {
+						
+						storedComments.add(comment);
+						statement.addBatch();
+					}
+					else if(mode == 1 && createdTime.after(lastDate))
+						break;
+					else {
+						storedComments.add(comment);
+						statement.addBatch();
+					}
+				}
+				if (!currentPagination.hasNext()) {
+					if(statement!= null)
+						statement.executeBatch();
+					break;
+				}
+				if(statement != null && i % 1000 == 0) {
+					statement.executeBatch();
+					statement.close();
+					statement = con.prepareStatement(sql);
+				}
+				
+				currentPagination = facebookClient.fetchConnectionPage(currentPagination.getNextPageUrl(), JsonObject.class);
+			}
+			
+		} catch (SQLException e) {
+			
+			System.out.println("================ {{{");
+	        SQLException current = e;
+	        do {
+	        	System.out.println("[error] " + e.getMessage() + " error type: " + e.getErrorCode() + " error cause: " + e.getCause());
+	            //current.printStackTrace();
+	        } while ((current = current.getNextException()) != null);
+	        System.out.println("================ }}}");
+			//e.printStackTrace();
+		} catch(FacebookGraphException g) {
+			System.out.println("[comment][saveLikes] "+ g.getMessage());
+			System.out.println("[typeError] " + g.getErrorType() + " Error code: " + g.getErrorCode());
+			
+		} finally {
+			if(con != null)
+				con.close();
+			if(statement != null)
+				statement.close();
+		}
+        System.out.println("Retrieved comments: " + storedComments.size());
+        return storedComments;
+	}
+	
+	public List<Comment> storeReplies(Comment c) {
+		Connection<JsonObject> replies = facebookClient.fetchConnection(
+				c.getPost().getIdFacebook() + "_" + c.getIdCommentFacebook() + "/comments",
+				JsonObject.class);
+		List<Comment> storedReplies = new ArrayList<>();
+		java.sql.Connection con = new Conexao().getConnection();
+		String sql = "INSERT INTO Comment ("
+				+ "COM_ID_FACEBOOK, "
+				+ "COM_ID_COMM_REPLIED, "
+				+ "COM_MESSAGE, "
+				+ "COM_FROM_ID, "
+				+ "COM_FROM_NAME, "
+				+ "COM_CREATED_TIME, "
+				+ "COM_POST_ID) "
+				+ "VALUES (?,?,?,?,?,?,?)";
+        
+        PreparedStatement statement = null;
+        int i = 0;
+        
+        try {
+			statement = con.prepareStatement(sql);
+			
+			while(true) {
+				Comment reply = null;
+				for(JsonObject obj: replies.getData()) {
+					reply = Comment.loadFromJson(obj, c.getPost(), c);
+					
+					statement.setLong(1, reply.getIdCommentFacebook());
+					statement.setLong(2, reply.getIdRepliedComment());
+					statement.setString(3, reply.getMessage());
+					statement.setLong(4, reply.getFromId());
+					statement.setString(5, reply.getFromName());
+					statement.setString(6, reply.getCreatedTime());
+					statement.setLong(7, c.getPost().getIdFacebook());
+					
+					Date createdTime = stringToDate(reply.getCreatedTime());
+					i++;
+					
+					if(lastDate == null) {
+						storedReplies.add(reply);
+						statement.addBatch();
+					}
+					else if(createdTime.after(lastDate))
+						break;
+				}
+				
+			}
+			
+		} catch (SQLException e) {
+			e.printStackTrace();
+		}
+		
+		return storedReplies;
+	}
+	
+	public void storeReplies(Comment comment, Post post) throws SQLException {
+		try {
+			Connection<JsonObject> replies = facebookClient.fetchConnection(
+					comment.getPost().getIdFacebook() + "_" + comment.getIdCommentFacebook() + "/comments",
+					JsonObject.class);
+			while (true) {
+				for (JsonObject obj2 : replies.getData()) {
+					Comment reply = Comment.loadFromJson(obj2, post, comment);
+					Date dateCurrentComment = stringToDate(reply.getCreatedTime());
+					if (lastDate.after(dateCurrentComment)) {
+						// if (!comment.isExists()) {
+						reply.saveComment();
+					} else
+						System.out.println("Reply Skiped");
+				}
+				if (!replies.hasNext()) {
+					break;
+				}
+				replies = facebookClient.fetchConnectionPage(replies.getNextPageUrl(), JsonObject.class);
+			}
+		} catch (Exception e) {
+			System.out.println("[fb][storeReplies] " + e.getMessage());
 		}
 	}
 
@@ -368,32 +622,7 @@ public class Facebook {
 		}
 
 		return reactions;
-	}
-
-	private void storeReplies(Comment comment, Post post) throws SQLException {
-		try {
-			Connection<JsonObject> replies = facebookClient.fetchConnection(
-					comment.getPost().getIdFacebook() + "_" + comment.getIdCommentFacebook() + "/comments",
-					JsonObject.class);
-			while (true) {
-				for (JsonObject obj2 : replies.getData()) {
-					Comment reply = Comment.loadFromJson(obj2, post, comment);
-					Date dateCurrentComment = stringToDate(reply.getCreatedTime());
-					if (lastDate.after(dateCurrentComment)) {
-						// if (!comment.isExists()) {
-						reply.saveComment();
-					} else
-						System.out.println("Reply Skiped");
-				}
-				if (!replies.hasNext()) {
-					break;
-				}
-				replies = facebookClient.fetchConnectionPage(replies.getNextPageUrl(), JsonObject.class);
-			}
-		} catch (Exception e) {
-			System.out.println("[fb][storeReplies] " + e.getMessage());
-		}
-	}
+	}	
 
 	public void storePostReaction(Post post) {
 		try {
@@ -415,6 +644,69 @@ public class Facebook {
 			System.out.println("[fb][storePostReaction] " + e.getMessage());
 		}
 	}
+	
+	public void storeReactions(Long idFacebook, Long idObject, int mode) throws SQLException {
+		java.sql.Connection con = null;
+		String query = idFacebook + "_" + idObject;
+		
+		String sql = "";
+		
+		if (mode == 1)
+			sql = "INSERT INTO Reaction_Post(RPT_ID_USER, RPT_ID_POST, RPT_TYPE) VALUES (?,?,?)";
+		else if (mode == 2)
+			sql = "INSERT INTO Reaction_Comment(RCT_ID_USER, RCT_ID_COMMENT, RCT_TYPE) VALUES (?,?,?)";
+		else if (mode == 3)
+			sql = "INSERT INTO Reaction_Reply(RRP_ID_USER, RRP_ID_REPLY, RRP_TYPE) VALUES (?,?,?)";
+		
+		int i = 0;
+		List<Reaction> listReactions = new ArrayList<>();
+		PreparedStatement statement = null;
+		try {
+			Connection<JsonObject> currentPage = facebookClient.fetchConnection(query + "/reactions", JsonObject.class);
+			
+			if(currentPage.getData().size() > 0) {
+				con = new Conexao().getConnection();
+				statement = con.prepareStatement(sql);
+			}
+			
+			while (true) {
+				Reaction reaction = null;
+				
+				for (JsonObject obj2 : currentPage.getData()) {
+					reaction = Reaction.loadFromJson(obj2);
+					reaction.setIdObject(idObject);
+		            
+		            statement.setLong(1, reaction.getIdUser());
+		            statement.setLong(2, idObject);
+		            statement.setString(3, reaction.getType());
+		            
+		            i++;
+		            statement.addBatch();
+					listReactions.add(reaction);
+				}
+				if(statement != null && i % 1000 == 0) {
+					statement.executeBatch();
+					statement.close();
+					statement = con.prepareStatement(sql);
+				}
+				
+				if (!currentPage.hasNext()) {
+					if(statement != null)
+						statement.executeBatch();
+					break;
+				}
+				currentPage = facebookClient.fetchConnectionPage(currentPage.getNextPageUrl(), JsonObject.class);
+			}
+		} catch (Exception e) {
+			System.out.println("[fb][storePostReaction] " + e.getMessage());
+		} finally {
+			if(con != null)
+				con.close();
+			if(statement != null)
+				statement.close();
+		}
+		System.out.println("Comments's Reactions count: " + listReactions.size());
+	}
 
 	public void getLastDateComment() throws SQLException {
 		java.sql.Connection con = new Conexao().getConnection();
@@ -425,8 +717,9 @@ public class Facebook {
 		try {
 			stm = con.prepareStatement(sql);
 			ResultSet rs = stm.executeQuery();
-			rs.next();
-			this.lastDate = stringToDate(rs.getString("COM_CREATED_TIME"));
+			
+			while(rs.next())
+				this.lastDate = stringToDate(rs.getString("COM_CREATED_TIME"));
 		} catch (SQLException e) {
 			// TODO Auto-generated catch block
 			e.printStackTrace();
@@ -472,6 +765,17 @@ public class Facebook {
 				+ reactions[3] + " -- SAD " + reactions[4] + " -- ANGRY " + reactions[5]);
 
 		// this.listOfPost.sort(c);
+	}
+
+	public MyPage getPageByName(String name) {
+		System.out.println("name: " + name);
+		Page currentPage = facebookClient.fetchObject(name, Page.class);
+		
+		MyPage page = new MyPage();
+		page.setIdFacebook(Long.parseLong(currentPage.getId()));
+		page.setName(currentPage.getName());
+		
+		return page;
 	}
 
 }
